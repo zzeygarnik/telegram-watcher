@@ -1,0 +1,27 @@
+# Telegram session files — contain full account access, NEVER commit
+*.session
+*.session-journal
+
+# Config with secrets
+config.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Docker
+.dockerenv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
