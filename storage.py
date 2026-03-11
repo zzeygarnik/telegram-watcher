@@ -20,7 +20,9 @@ class Storage:
             password=self.config.DB_PASS,
             database=self.config.DB_NAME,
             min_size=5,
-            max_size=20
+            max_size=20,
+            command_timeout=30,
+            max_inactive_connection_lifetime=60,
         )
         async with self.pool.acquire() as conn:
             # Таблица сообщений
