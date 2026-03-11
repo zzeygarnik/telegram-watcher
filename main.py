@@ -149,7 +149,7 @@ async def resolve_chat(client, identifier):
 # --- MAIN ---
 async def main():
     await db.connect()
-    logger.info("🚀 Bot Starting (Polling Mode)...")
+    logger.info("🚀 Bot Starting (Polling Mode) | v2 — watchdog + asyncpg timeouts")
     await app.start()
 
     try:
