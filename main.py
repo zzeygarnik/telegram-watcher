@@ -30,6 +30,8 @@ last_activity = time.time()
 # Настройки опроса (в секундах)
 POLL_INTERVAL = 10
 WATCHDOG_TIMEOUT = 300  # 5 минут без активности → перезапуск
+MAX_RETRIES = 3         # попыток перед тем как сдаться на этом цикле
+RETRY_DELAY = 5         # секунд между попытками
 
 # --- 0. WATCHDOG ---
 async def watchdog_loop():
@@ -106,34 +108,35 @@ async def polling_loop(client, source_id):
     """
     logger.info(f"🔄 Polling loop started for {source_id}")
     while True:
-        try:
-            # Берем последние 10 сообщений (на случай, если пришло несколько сразу)
-            # reverse=True нужно, чтобы они шли от старых к новым
-            messages = []
-            async for m in client.get_chat_history(source_id, limit=10):
-                messages.append(m)
-            
-            # Разворачиваем, чтобы обрабатывать в хронологическом порядке
-            for message in reversed(messages):
-                # Если сообщение УЖЕ в базе - игнорируем (молча)
-                if await db.is_processed(message.chat.id, message.id):
-                    continue
-                
-                # Если НОВОЕ - кидаем в очередь
-                logger.info(f"📥 New message found via polling: {message.id}")
-                await msg_queue.put(message)
+        global last_activity
+        last_activity = time.time()  # цикл живой — обновляем сразу
 
-            global last_activity
-            last_activity = time.time()
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                messages = []
+                async for m in client.get_chat_history(source_id, limit=10):
+                    messages.append(m)
 
-        except FloodWait as e:
-            logger.warning(f"⏳ FloodWait {e.value}s")
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            logger.error(f"⚠️ Polling error: {e}")
-            # Не падаем, просто ждем следующего цикла
+                for message in reversed(messages):
+                    if await db.is_processed(message.chat.id, message.id):
+                        continue
+                    logger.info(f"📥 New message found via polling: {message.id}")
+                    await msg_queue.put(message)
 
-        # Спим перед следующим запросом
+                break  # успех — выходим из retry-цикла
+
+            except FloodWait as e:
+                logger.warning(f"⏳ FloodWait {e.value}s")
+                await asyncio.sleep(e.value)
+                break  # FloodWait — не ошибка, просто ждём и идём дальше
+
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"⚠️ Polling error (attempt {attempt}/{MAX_RETRIES}): {e}, retrying in {RETRY_DELAY}s...")
+                    await asyncio.sleep(RETRY_DELAY)
+                else:
+                    logger.error(f"⚠️ Polling failed after {MAX_RETRIES} attempts: {e}")
+
         await asyncio.sleep(POLL_INTERVAL)
 
 async def resolve_chat(client, identifier):
