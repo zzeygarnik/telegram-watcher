@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import time
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 
@@ -24,9 +25,21 @@ app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH)
 db = Storage(config)
 ALBUM_CACHE = set()
 msg_queue = asyncio.Queue()
+last_activity = time.time()
 
 # Настройки опроса (в секундах)
-POLL_INTERVAL = 10 
+POLL_INTERVAL = 10
+WATCHDOG_TIMEOUT = 300  # 5 минут без активности → перезапуск
+
+# --- 0. WATCHDOG ---
+async def watchdog_loop():
+    logger.info("🐕 Watchdog started")
+    while True:
+        await asyncio.sleep(60)
+        idle = time.time() - last_activity
+        if idle > WATCHDOG_TIMEOUT:
+            logger.critical(f"💀 Watchdog: no activity for {idle:.0f}s, forcing restart")
+            sys.exit(1)
 
 # --- 1. ВОРКЕР (Обработчик очереди - без изменений) ---
 async def worker_loop(client, target_id):
@@ -110,13 +123,16 @@ async def polling_loop(client, source_id):
                 logger.info(f"📥 New message found via polling: {message.id}")
                 await msg_queue.put(message)
 
+            global last_activity
+            last_activity = time.time()
+
         except FloodWait as e:
             logger.warning(f"⏳ FloodWait {e.value}s")
             await asyncio.sleep(e.value)
         except Exception as e:
             logger.error(f"⚠️ Polling error: {e}")
             # Не падаем, просто ждем следующего цикла
-        
+
         # Спим перед следующим запросом
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -145,12 +161,12 @@ async def main():
         await app.stop()
         return
 
-    # Запускаем два параллельных процесса:
+    # Запускаем три параллельных процесса:
     # 1. Worker (отправляет сообщения)
     asyncio.create_task(worker_loop(app, target_id))
-    
-    # 2. Poller (ищет новые сообщения)
-    # Это блокирующая задача, поэтому запускаем её последней или через task
+    # 2. Watchdog (перезапускает при зависании)
+    asyncio.create_task(watchdog_loop())
+    # 3. Poller (ищет новые сообщения)
     await polling_loop(app, source_id)
 
     # Сюда код дойдет только если polling_loop упадет (чего быть не должно)
