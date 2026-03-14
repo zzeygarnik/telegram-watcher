@@ -30,24 +30,41 @@ last_activity = time.time()
 # Настройки опроса (в секундах)
 POLL_INTERVAL = 10
 WATCHDOG_TIMEOUT = 300  # 5 минут без активности → перезапуск
-MAX_RETRIES = 3         # попыток перед тем как сдаться на этом цикле
-RETRY_DELAY = 5         # секунд между попытками
+API_TIMEOUT = 30        # таймаут на каждый Pyrogram API call
+
+worker_task = None  # отслеживаем задачу воркера
+_target_id = None   # нужен воtчдогу для перезапуска воркера
 
 # --- 0. WATCHDOG ---
 async def watchdog_loop():
+    global worker_task, _target_id
     logger.info("🐕 Watchdog started")
     while True:
         await asyncio.sleep(60)
+
+        # Проверяем, не упал ли воркер тихо
+        if worker_task is not None and worker_task.done():
+            exc = None
+            if not worker_task.cancelled():
+                try:
+                    exc = worker_task.exception()
+                except Exception:
+                    pass
+            logger.critical(f"💀 Watchdog: worker task died (exc={exc}), restarting worker")
+            worker_task = asyncio.create_task(worker_loop(app, _target_id))
+
         idle = time.time() - last_activity
         if idle > WATCHDOG_TIMEOUT:
             logger.critical(f"💀 Watchdog: no activity for {idle:.0f}s, forcing restart")
             sys.exit(1)
 
-# --- 1. ВОРКЕР (Обработчик очереди - без изменений) ---
+# --- 1. ВОРКЕР (Обработчик очереди) ---
 async def worker_loop(client, target_id):
+    global last_activity
     logger.info("👷 Worker started")
     while True:
         message = await msg_queue.get()
+        msg_id = None
         try:
             chat_id = message.chat.id
             msg_id = message.id
@@ -63,37 +80,51 @@ async def worker_loop(client, target_id):
                     continue
                 ALBUM_CACHE.add(message.media_group_id)
                 logger.info(f"📚 Album detected: {message.media_group_id}")
-                
+
                 # Ждем, пока Telegram "обновит" данные о группе медиа
-                await asyncio.sleep(2) 
+                await asyncio.sleep(2)
 
                 try:
-                    # Запрашиваем полную группу медиа
-                    media_group = await client.get_media_group(chat_id, msg_id)
+                    media_group = await asyncio.wait_for(
+                        client.get_media_group(chat_id, msg_id), timeout=API_TIMEOUT
+                    )
                 except ValueError:
                     media_group = [message]
 
                 is_fwd = any(m.forward_date for m in media_group)
                 if is_fwd:
-                    await client.forward_messages(target_id, chat_id, [m.id for m in media_group])
+                    await asyncio.wait_for(
+                        client.forward_messages(target_id, chat_id, [m.id for m in media_group]),
+                        timeout=API_TIMEOUT
+                    )
                 else:
-                    await client.copy_media_group(target_id, chat_id, msg_id)
+                    await asyncio.wait_for(
+                        client.copy_media_group(target_id, chat_id, msg_id),
+                        timeout=API_TIMEOUT
+                    )
 
-                for m in media_group: await db.mark_processed(chat_id, m.id)
-                if len(ALBUM_CACHE) > 100: ALBUM_CACHE.clear()
+                for m in media_group:
+                    await db.mark_processed(chat_id, m.id)
+                if len(ALBUM_CACHE) > 100:
+                    ALBUM_CACHE.clear()
+                last_activity = time.time()
                 await db.log_event("SENT", message, "Album mirrored")
 
             # Обычные сообщения
             else:
                 if message.forward_date:
-                    await message.forward(target_id)
+                    await asyncio.wait_for(message.forward(target_id), timeout=API_TIMEOUT)
                 else:
-                    await message.copy(target_id)
-                
+                    await asyncio.wait_for(message.copy(target_id), timeout=API_TIMEOUT)
+
                 await db.mark_processed(chat_id, msg_id)
+                last_activity = time.time()
                 logger.info(f"✅ Sent Msg {msg_id}")
                 await db.log_event("SENT", message, "Message mirrored")
 
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ Worker timeout on Msg {msg_id}, skipping")
+            await db.log_event("ERROR", "System", f"Timeout sending Msg {msg_id}")
         except Exception as e:
             logger.error(f"❌ Worker Error: {e}")
             await db.log_event("ERROR", "System", str(e))
@@ -108,35 +139,34 @@ async def polling_loop(client, source_id):
     """
     logger.info(f"🔄 Polling loop started for {source_id}")
     while True:
-        global last_activity
-        last_activity = time.time()  # цикл живой — обновляем сразу
+        try:
+            # Берем последние 10 сообщений (на случай, если пришло несколько сразу)
+            # reverse=True нужно, чтобы они шли от старых к новым
+            messages = []
+            async for m in client.get_chat_history(source_id, limit=10):
+                messages.append(m)
+            
+            # Разворачиваем, чтобы обрабатывать в хронологическом порядке
+            for message in reversed(messages):
+                # Если сообщение УЖЕ в базе - игнорируем (молча)
+                if await db.is_processed(message.chat.id, message.id):
+                    continue
+                
+                # Если НОВОЕ - кидаем в очередь
+                logger.info(f"📥 New message found via polling: {message.id}")
+                await msg_queue.put(message)
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                messages = []
-                async for m in client.get_chat_history(source_id, limit=10):
-                    messages.append(m)
+            global last_activity
+            last_activity = time.time()
 
-                for message in reversed(messages):
-                    if await db.is_processed(message.chat.id, message.id):
-                        continue
-                    logger.info(f"📥 New message found via polling: {message.id}")
-                    await msg_queue.put(message)
+        except FloodWait as e:
+            logger.warning(f"⏳ FloodWait {e.value}s")
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            logger.error(f"⚠️ Polling error: {e}")
+            # Не падаем, просто ждем следующего цикла
 
-                break  # успех — выходим из retry-цикла
-
-            except FloodWait as e:
-                logger.warning(f"⏳ FloodWait {e.value}s")
-                await asyncio.sleep(e.value)
-                break  # FloodWait — не ошибка, просто ждём и идём дальше
-
-            except Exception as e:
-                if attempt < MAX_RETRIES:
-                    logger.warning(f"⚠️ Polling error (attempt {attempt}/{MAX_RETRIES}): {e}, retrying in {RETRY_DELAY}s...")
-                    await asyncio.sleep(RETRY_DELAY)
-                else:
-                    logger.error(f"⚠️ Polling failed after {MAX_RETRIES} attempts: {e}")
-
+        # Спим перед следующим запросом
         await asyncio.sleep(POLL_INTERVAL)
 
 async def resolve_chat(client, identifier):
@@ -152,7 +182,7 @@ async def resolve_chat(client, identifier):
 # --- MAIN ---
 async def main():
     await db.connect()
-    logger.info("🚀 Bot Starting (Polling Mode) | v2 — watchdog + asyncpg timeouts")
+    logger.info("🚀 Bot Starting (Polling Mode)...")
     await app.start()
 
     try:
@@ -164,10 +194,13 @@ async def main():
         await app.stop()
         return
 
+    global worker_task, _target_id
+    _target_id = target_id
+
     # Запускаем три параллельных процесса:
     # 1. Worker (отправляет сообщения)
-    asyncio.create_task(worker_loop(app, target_id))
-    # 2. Watchdog (перезапускает при зависании)
+    worker_task = asyncio.create_task(worker_loop(app, target_id))
+    # 2. Watchdog (перезапускает при зависании или смерти воркера)
     asyncio.create_task(watchdog_loop())
     # 3. Poller (ищет новые сообщения)
     await polling_loop(app, source_id)
