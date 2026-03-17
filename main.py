@@ -70,13 +70,11 @@ async def worker_loop(client, target_id):
             msg_id = message.id
 
             if await db.is_processed(chat_id, msg_id):
-                msg_queue.task_done()
                 continue
 
             # Альбомы
             if message.media_group_id:
                 if message.media_group_id in ALBUM_CACHE:
-                    msg_queue.task_done()
                     continue
                 ALBUM_CACHE.add(message.media_group_id)
                 logger.info(f"📚 Album detected: {message.media_group_id}")
