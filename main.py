@@ -19,6 +19,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 # Инициализация
 app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH)

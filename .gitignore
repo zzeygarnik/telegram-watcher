@@ -25,3 +25,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Claude Code
+.claude/
+.claudecode.json
+CONTEXT.md
+
+# Debug / one-off scripts
+debug.py
+debug_mirror.py
+check_target.py

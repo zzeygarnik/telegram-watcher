@@ -1,8 +1,14 @@
 #!/bin/sh
 cd /app
 
-# Устанавливаем зависимости (на всякий случай)
-pip install --no-cache-dir -r requirements.txt
+# Устанавливаем зависимости если не установлены (fallback если образ собрался без них)
+pip install --no-cache-dir --timeout 60 \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
+  -r requirements.txt || \
+pip install --no-cache-dir --timeout 60 \
+  -i https://mirrors.aliyun.com/pypi/simple/ \
+  -r requirements.txt || \
+echo "⚠️ pip install failed, continuing with existing packages"
 
 echo "🖥 ЗАПУСК ДАШБОРДА (В ФОНЕ)..."
 # Запускаем сайт в фоновом режиме (& в конце), логи сайта нам не особо важны сейчас
