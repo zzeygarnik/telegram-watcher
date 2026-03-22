@@ -23,3 +23,9 @@ DB_PORT = 5432
 DB_NAME = "telegram_watcher"
 DB_USER = "postgres"
 DB_PASS = "your_password_here"
+
+# --- Proxy (optional) ---
+# If Telegram is blocked in your region, set the PROXY_URL environment variable
+# in your container settings. Format: socks5://user:pass@host:port
+# Both SOCKS5 and HTTP are supported. Leave unset to connect directly.
+# This is read automatically from the environment — no changes needed here.

@@ -7,7 +7,7 @@ from pyrogram.errors import FloodWait
 
 # Импорт конфига
 from config import (
-    API_ID, API_HASH, SOURCE_CHANNEL, TARGET_CHANNEL, HISTORY_DEPTH
+    API_ID, API_HASH, SOURCE_CHANNEL, TARGET_CHANNEL, HISTORY_DEPTH, PROXY
 )
 import config 
 from storage import Storage
@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 # Инициализация
-app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH)
+app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH, proxy=PROXY)
+if PROXY:
+    logger.info(f"🌐 Proxy: {PROXY['scheme']}://{PROXY['hostname']}:{PROXY['port']}")
 db = Storage(config)
 ALBUM_CACHE = set()
 msg_queue = asyncio.Queue()

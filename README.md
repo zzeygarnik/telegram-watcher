@@ -59,6 +59,16 @@ DB_USER = "postgres"
 DB_PASS = "your_password"
 ```
 
+### 🌐 Proxy support (optional)
+
+If Telegram is blocked in your region, set the `PROXY_URL` environment variable in your container settings:
+
+```
+PROXY_URL=socks5://user:pass@host:port
+```
+
+Both SOCKS5 and HTTP proxies are supported. If the variable is not set, the bot connects directly.
+
 ---
 
 ## 🚀 Getting Started
@@ -250,6 +260,16 @@ DB_NAME = "telegram_watcher"
 DB_USER = "postgres"
 DB_PASS = "твой_пароль"
 ```
+
+### 🌐 Поддержка прокси (опционально)
+
+Если Telegram заблокирован в твоём регионе, задай переменную окружения `PROXY_URL` в настройках контейнера:
+
+```
+PROXY_URL=socks5://user:pass@host:port
+```
+
+Поддерживаются SOCKS5 и HTTP прокси. Если переменная не задана — бот подключается напрямую.
 
 ---
 
