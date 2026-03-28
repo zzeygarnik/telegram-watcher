@@ -27,7 +27,7 @@ if PROXY:
     logger.info(f"🌐 Proxy: {PROXY['scheme']}://{PROXY['hostname']}:{PROXY['port']}")
 db = Storage(config)
 ALBUM_CACHE = set()
-msg_queue = asyncio.Queue()
+msg_queue = None
 last_activity = time.time()
 
 # Настройки опроса (в секундах)
@@ -182,6 +182,8 @@ async def resolve_chat(client, identifier):
 
 # --- MAIN ---
 async def main():
+    global msg_queue
+    msg_queue = asyncio.Queue()
     await db.connect()
     logger.info("🚀 Bot Starting (Polling Mode)...")
     await app.start()
