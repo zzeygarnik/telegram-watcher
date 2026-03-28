@@ -13,8 +13,9 @@ A self-hosted Telegram channel mirroring bot that silently copies posts from a s
 - **Live polling** — actively polls the source channel every N seconds, works even when Telegram push notifications fail
 - **History backfill** — on first launch, mirrors existing messages up to a configurable depth
 - **Duplicate protection** — PostgreSQL-backed deduplication prevents re-sending already mirrored messages
+- **Watchdog** — automatically restarts the worker if it crashes or becomes unresponsive
 - **Web dashboard** — real-time activity log via Streamlit UI (auto-refreshes every 10 seconds)
-- **Docker-ready** — fully containerized, designed to run on home servers (e.g. TrueNAS, Unraid)
+- **Docker-ready** — fully containerized, designed to run on any Linux server
 
 ---
 
@@ -22,12 +23,11 @@ A self-hosted Telegram channel mirroring bot that silently copies posts from a s
 
 ```
 telegram-watcher/
-├── main.py              # Bot core: polling loop + message worker
+├── main.py              # Bot core: polling loop, worker queue, watchdog
 ├── storage.py           # PostgreSQL async storage (asyncpg)
 ├── dashboard.py         # Streamlit monitoring dashboard
 ├── scan.py              # Utility: scan and print real channel IDs
 ├── reset_db.py          # Utility: manually remove specific message IDs from DB
-├── create_session.py    # Utility: create or re-create the Telegram session file
 ├── config.example.py    # Configuration template (copy to config.py and fill in)
 ├── requirements.txt     # Python dependencies
 ├── Dockerfile           # Container image definition
@@ -44,30 +44,34 @@ telegram-watcher/
 Copy `config.example.py` to `config.py` and fill in your values:
 
 ```python
-# config.py
-
-API_ID      = 123456           # From https://my.telegram.org
+API_ID      = 123456
 API_HASH    = "your_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # Source channel ID
 TARGET_CHANNEL  = -1009876543210  # Mirror channel ID
 HISTORY_DEPTH   = 100             # How many past messages to backfill
 
-DB_HOST = "your_postgres_host"
+# If PostgreSQL runs on the host: use "localhost"
+# If PostgreSQL runs in a Docker container on the same network: use the container name
+DB_HOST = "localhost"
 DB_PORT = 5432
 DB_NAME = "telegram_watcher"
 DB_USER = "postgres"
 DB_PASS = "your_password"
+
+PROXY = None  # or {"scheme": "socks5", "hostname": "host", "port": 1234}
 ```
 
 ### 🌐 Proxy support (optional)
 
-If Telegram is blocked in your region, set the `PROXY_URL` environment variable in your container settings:
+If Telegram is blocked in your region, set `PROXY` in `config.py`:
 
-```
-PROXY_URL=socks5://user:pass@host:port
+```python
+PROXY = {"scheme": "socks5", "hostname": "your.proxy.host", "port": 1234}
+# With authentication:
+PROXY = {"scheme": "socks5", "hostname": "your.proxy.host", "port": 1234, "username": "user", "password": "pass"}
 ```
 
-Both SOCKS5 and HTTP proxies are supported. If the variable is not set, the bot connects directly.
+Both SOCKS5 and HTTP proxies are supported. Set `PROXY = None` to connect directly.
 
 ---
 
@@ -75,20 +79,26 @@ Both SOCKS5 and HTTP proxies are supported. If the variable is not set, the bot 
 
 ### Prerequisites
 
-- Docker & Docker Compose
+- Docker
 - A Telegram account (not a bot token — a user account session is required)
-- PostgreSQL database (can be a separate container)
+- PostgreSQL database (can run directly on the host or in a Docker container)
 
 ### 1. Get your Telegram session file
 
-Run `create_session.py` locally to authenticate and generate the `my_mirror_bot.session` file:
+Run `scan.py` locally to authenticate and generate the session file:
 
 ```bash
-pip install pyrogram==2.0.106 tgcrypto
-python create_session.py
+pip install pyrogram tgcrypto
+python scan.py
 ```
 
-Follow the Pyrogram auth flow (enter your phone number and the code from Telegram). This creates `my_mirror_bot.session` in the project directory. Place it on your server alongside `config.py`.
+This creates `scanner_session.session`. To generate `my_mirror_bot.session` (the name the bot expects) directly, run:
+
+```bash
+python -c "from pyrogram import Client; from config import API_ID, API_HASH; Client('my_mirror_bot', api_id=API_ID, api_hash=API_HASH).run()"
+```
+
+Follow the Pyrogram auth flow (phone number + code from Telegram). Once done, press `Ctrl+C`.
 
 ### 2. Configure
 
@@ -97,15 +107,33 @@ cp config.example.py config.py
 # Edit config.py with your values
 ```
 
-Use `scan.py` to find the real numeric IDs of your source and target channels:
+Use `scan.py` to find the real numeric IDs of your channels — send a message to a channel and the ID will appear in the console output.
 
-```bash
-python scan.py
+### 3. Set up the database
+
+Create the database and user in PostgreSQL:
+
+```sql
+CREATE DATABASE telegram_watcher;
+CREATE USER tg_mirror WITH PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE telegram_watcher TO tg_mirror;
+ALTER DATABASE telegram_watcher OWNER TO tg_mirror;
 ```
 
-Send a message to the channel — the numeric ID will appear in the console output.
+**If PostgreSQL runs in Docker**, execute via the container:
 
-### 3. Run with Docker
+```bash
+docker exec -it <postgres_container_name> psql -U postgres -c "CREATE DATABASE telegram_watcher;"
+docker exec -it <postgres_container_name> psql -U postgres -c "CREATE USER tg_mirror WITH PASSWORD 'your_password';"
+docker exec -it <postgres_container_name> psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE telegram_watcher TO tg_mirror;"
+docker exec -it <postgres_container_name> psql -U postgres -c "ALTER DATABASE telegram_watcher OWNER TO tg_mirror;"
+```
+
+Then set `DB_HOST` in `config.py` to the **container name** (not `localhost`), and make sure both containers are on the same Docker network (see step 4).
+
+### 4. Run with Docker
+
+**Simple setup** (PostgreSQL on host):
 
 ```bash
 docker build -t telegram-watcher .
@@ -118,15 +146,40 @@ docker run -d \
   telegram-watcher
 ```
 
-Or with Docker Compose (recommended):
+**PostgreSQL also in Docker** — both containers must share a network:
 
 ```bash
-docker compose up -d
+docker network create tg-net
+docker network connect tg-net <postgres_container_name>
+
+docker run -d \
+  --name telegram-watcher \
+  --restart unless-stopped \
+  --network tg-net \
+  -p 8501:8501 \
+  -v $(pwd)/config.py:/app/config.py \
+  -v $(pwd)/my_mirror_bot.session:/app/my_mirror_bot.session \
+  telegram-watcher
 ```
 
-### 4. Access the Dashboard
+### 5. Access the Dashboard
 
 Open [http://localhost:8501](http://localhost:8501) in your browser.
+
+---
+
+## 🔄 Redeploying after code changes
+
+```bash
+git pull
+docker build -t telegram-watcher .
+docker rm -f telegram-watcher
+docker run -d --name telegram-watcher --restart unless-stopped --network tg-net \
+  -p 8501:8501 \
+  -v $(pwd)/config.py:/app/config.py \
+  -v $(pwd)/my_mirror_bot.session:/app/my_mirror_bot.session \
+  telegram-watcher
+```
 
 ---
 
@@ -146,15 +199,6 @@ All timestamps are displayed in **Moscow Time (UTC+3)**.
 ---
 
 ## 🛠️ Utility Scripts
-
-### `create_session.py`
-Creates or re-creates the `my_mirror_bot.session` file. Run this locally whenever the session becomes invalid (e.g. after being revoked via Telegram Settings → Devices).
-
-```bash
-python create_session.py
-```
-
-After `Session OK!` appears, copy `my_mirror_bot.session` to your server's app directory and restart the bot.
 
 ### `scan.py`
 Listens for incoming messages and prints the **real numeric chat ID** of any channel that sends a message. Use this to find `SOURCE_CHANNEL` and `TARGET_CHANNEL` values.
@@ -180,16 +224,15 @@ python reset_db.py
 | Database      | PostgreSQL via [asyncpg](https://github.com/MagicStack/asyncpg) |
 | Dashboard     | [Streamlit](https://streamlit.io/)  |
 | Containerization | Docker                           |
-| Hosting       | TrueNAS / any Linux server          |
+| Hosting       | Any Linux server                    |
 
 ---
 
 ## 🔒 Security Notes
 
 - Never commit `config.py` or `.session` files to version control
-- Add both to `.gitignore` before your first commit
+- Both are already covered by `.gitignore`
 - The `.session` file grants full access to your Telegram account
-- Consider using environment variables or a `.env` file for production deployments
 
 ---
 
@@ -215,8 +258,9 @@ MIT License. Use at your own risk. Mirroring channels may violate Telegram's Ter
 - **Активный поллинг** — бот сам опрашивает канал каждые N секунд, работает даже если Telegram не присылает push-уведомления
 - **Заполнение истории** — при первом запуске зеркалирует уже существующие сообщения на заданную глубину
 - **Защита от дублей** — PostgreSQL хранит ID обработанных сообщений, повторная отправка исключена
+- **Watchdog** — автоматически перезапускает воркер при сбое или зависании
 - **Веб-дашборд** — лог активности в реальном времени через Streamlit (обновляется каждые 10 секунд)
-- **Docker-ready** — полностью контейнеризирован, рассчитан на запуск на домашнем сервере (TrueNAS, Unraid и др.)
+- **Docker-ready** — полностью контейнеризирован, рассчитан на запуск на любом Linux-сервере
 
 ---
 
@@ -224,12 +268,11 @@ MIT License. Use at your own risk. Mirroring channels may violate Telegram's Ter
 
 ```
 telegram-watcher/
-├── main.py              # Ядро бота: цикл поллинга + воркер сообщений
+├── main.py              # Ядро бота: цикл поллинга, очередь воркера, watchdog
 ├── storage.py           # Асинхронное хранилище PostgreSQL (asyncpg)
 ├── dashboard.py         # Дашборд мониторинга на Streamlit
 ├── scan.py              # Утилита: поиск реального числового ID канала
 ├── reset_db.py          # Утилита: удаление конкретных сообщений из БД
-├── create_session.py    # Утилита: создание или пересоздание файла сессии Telegram
 ├── config.example.py    # Шаблон конфигурации (скопируй в config.py и заполни)
 ├── requirements.txt     # Python-зависимости
 ├── Dockerfile           # Образ контейнера
@@ -246,30 +289,34 @@ telegram-watcher/
 Скопируй `config.example.py` в `config.py` и заполни своими значениями:
 
 ```python
-# config.py
-
-API_ID      = 123456           # С https://my.telegram.org
+API_ID      = 123456
 API_HASH    = "твой_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # ID канала-источника
 TARGET_CHANNEL  = -1009876543210  # ID канала-зеркала
 HISTORY_DEPTH   = 100             # Глубина заполнения истории (кол-во сообщений)
 
-DB_HOST = "адрес_твоей_бд"
+# Если PostgreSQL запущен на хосте — используй "localhost"
+# Если PostgreSQL запущен в Docker-контейнере в той же сети — используй имя контейнера
+DB_HOST = "localhost"
 DB_PORT = 5432
 DB_NAME = "telegram_watcher"
 DB_USER = "postgres"
 DB_PASS = "твой_пароль"
+
+PROXY = None  # или {"scheme": "socks5", "hostname": "host", "port": 1234}
 ```
 
 ### 🌐 Поддержка прокси (опционально)
 
-Если Telegram заблокирован в твоём регионе, задай переменную окружения `PROXY_URL` в настройках контейнера:
+Если Telegram заблокирован в твоём регионе, задай `PROXY` в `config.py`:
 
-```
-PROXY_URL=socks5://user:pass@host:port
+```python
+PROXY = {"scheme": "socks5", "hostname": "твой.прокси.хост", "port": 1234}
+# С авторизацией:
+PROXY = {"scheme": "socks5", "hostname": "твой.прокси.хост", "port": 1234, "username": "user", "password": "pass"}
 ```
 
-Поддерживаются SOCKS5 и HTTP прокси. Если переменная не задана — бот подключается напрямую.
+Поддерживаются SOCKS5 и HTTP прокси. Чтобы подключаться напрямую — оставь `PROXY = None`.
 
 ---
 
@@ -277,20 +324,26 @@ PROXY_URL=socks5://user:pass@host:port
 
 ### Что нужно заранее
 
-- Docker и Docker Compose
+- Docker
 - Аккаунт Telegram (не бот-токен — требуется сессия пользовательского аккаунта)
-- База данных PostgreSQL (может быть отдельным контейнером)
+- База данных PostgreSQL (может быть на хосте или в отдельном Docker-контейнере)
 
 ### 1. Получи файл сессии Telegram
 
-Запусти `create_session.py` локально, чтобы пройти авторизацию и создать файл `my_mirror_bot.session`:
+Запусти `scan.py` локально, чтобы пройти авторизацию:
 
 ```bash
-pip install pyrogram==2.0.106 tgcrypto
-python create_session.py
+pip install pyrogram tgcrypto
+python scan.py
 ```
 
-Следуй инструкциям: введи номер телефона и код из Telegram. После появления `Session OK!` файл `my_mirror_bot.session` будет создан в папке проекта. Скопируй его на сервер рядом с `config.py`.
+Чтобы сразу создать файл с нужным именем (`my_mirror_bot.session`), выполни:
+
+```bash
+python -c "from pyrogram import Client; from config import API_ID, API_HASH; Client('my_mirror_bot', api_id=API_ID, api_hash=API_HASH).run()"
+```
+
+Введи номер телефона и код из Telegram. После успешного входа нажми `Ctrl+C`.
 
 ### 2. Настройка
 
@@ -299,15 +352,33 @@ cp config.example.py config.py
 # Отредактируй config.py, вписав свои значения
 ```
 
-Используй `scan.py`, чтобы найти реальные числовые ID каналов:
+Используй `scan.py`, чтобы найти реальные числовые ID каналов — напиши что-нибудь в канал и ID появится в выводе консоли.
 
-```bash
-python scan.py
+### 3. Создай базу данных
+
+Выполни в PostgreSQL:
+
+```sql
+CREATE DATABASE telegram_watcher;
+CREATE USER tg_mirror WITH PASSWORD 'твой_пароль';
+GRANT ALL PRIVILEGES ON DATABASE telegram_watcher TO tg_mirror;
+ALTER DATABASE telegram_watcher OWNER TO tg_mirror;
 ```
 
-Напиши что-нибудь в канал — числовой ID появится в выводе консоли.
+**Если PostgreSQL запущен в Docker**, выполни через контейнер:
 
-### 3. Запуск через Docker
+```bash
+docker exec -it <имя_контейнера_postgres> psql -U postgres -c "CREATE DATABASE telegram_watcher;"
+docker exec -it <имя_контейнера_postgres> psql -U postgres -c "CREATE USER tg_mirror WITH PASSWORD 'твой_пароль';"
+docker exec -it <имя_контейнера_postgres> psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE telegram_watcher TO tg_mirror;"
+docker exec -it <имя_контейнера_postgres> psql -U postgres -c "ALTER DATABASE telegram_watcher OWNER TO tg_mirror;"
+```
+
+Затем укажи в `config.py` значение `DB_HOST` равное **имени контейнера** (не `localhost`) и убедись, что оба контейнера находятся в одной Docker-сети (см. шаг 4).
+
+### 4. Запуск через Docker
+
+**Простой вариант** (PostgreSQL на хосте):
 
 ```bash
 docker build -t telegram-watcher .
@@ -320,15 +391,40 @@ docker run -d \
   telegram-watcher
 ```
 
-Или через Docker Compose (рекомендуется):
+**PostgreSQL тоже в Docker** — оба контейнера должны быть в одной сети:
 
 ```bash
-docker compose up -d
+docker network create tg-net
+docker network connect tg-net <имя_контейнера_postgres>
+
+docker run -d \
+  --name telegram-watcher \
+  --restart unless-stopped \
+  --network tg-net \
+  -p 8501:8501 \
+  -v $(pwd)/config.py:/app/config.py \
+  -v $(pwd)/my_mirror_bot.session:/app/my_mirror_bot.session \
+  telegram-watcher
 ```
 
-### 4. Открой дашборд
+### 5. Открой дашборд
 
 Перейди в браузере по адресу [http://localhost:8501](http://localhost:8501).
+
+---
+
+## 🔄 Передеплой после изменений в коде
+
+```bash
+git pull
+docker build -t telegram-watcher .
+docker rm -f telegram-watcher
+docker run -d --name telegram-watcher --restart unless-stopped --network tg-net \
+  -p 8501:8501 \
+  -v $(pwd)/config.py:/app/config.py \
+  -v $(pwd)/my_mirror_bot.session:/app/my_mirror_bot.session \
+  telegram-watcher
+```
 
 ---
 
@@ -348,15 +444,6 @@ Streamlit-дашборд показывает лог активности с ц�
 ---
 
 ## 🛠️ Утилиты
-
-### `create_session.py`
-Создаёт или пересоздаёт файл `my_mirror_bot.session`. Запускай локально, когда сессия становится невалидной (например, после отзыва через Telegram → Настройки → Устройства).
-
-```bash
-python create_session.py
-```
-
-После появления `Session OK!` скопируй `my_mirror_bot.session` в папку приложения на сервере и перезапусти бота.
 
 ### `scan.py`
 Слушает входящие сообщения и выводит **реальный числовой ID** любого канала, который пришлёт сообщение. Используй для определения `SOURCE_CHANNEL` и `TARGET_CHANNEL`.
@@ -382,7 +469,7 @@ python reset_db.py
 | База данных     | PostgreSQL через [asyncpg](https://github.com/MagicStack/asyncpg) |
 | Дашборд         | [Streamlit](https://streamlit.io/)      |
 | Контейнеризация | Docker                                  |
-| Хостинг         | TrueNAS / любой Linux-сервер            |
+| Хостинг         | Любой Linux-сервер                      |
 
 ---
 
@@ -391,7 +478,6 @@ python reset_db.py
 - Никогда не коммить `config.py` и `.session` файлы в репозиторий
 - Оба файла уже добавлены в `.gitignore`
 - Файл `.session` даёт полный доступ к твоему аккаунту Telegram
-- Для продакшена рекомендуется перейти на переменные окружения или `.env` файл
 
 ---
 
