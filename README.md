@@ -8,12 +8,13 @@ A self-hosted Telegram channel mirroring bot that silently copies posts from a s
 
 - **Silent mirroring** — messages are copied (not forwarded), so no source attribution appears in the mirror channel
 - **Smart forwarding** — if a post in the source channel is itself a forward from another user or channel, that attribution *is* preserved
-- **Album support** — correctly handles media groups (e.g. 5 photos + caption) as a single cohesive post
+- **Real-time events** — uses Pyrogram's MTProto event system to receive messages instantly as they arrive, no polling delay
+- **Startup catchup** — on every launch, checks the last `HISTORY_DEPTH` messages and queues any that were missed during downtime
+- **Smart album sync** — dynamically polls `get_media_group` until the part count stabilizes (two equal consecutive checks), then forwards — no fixed delay, no partial albums
 - **All media types** — text, photos, videos, voice messages, video notes (circles), documents, audio, stickers
-- **Live polling** — actively polls the source channel every N seconds, works even when Telegram push notifications fail
-- **History backfill** — on first launch, mirrors existing messages up to a configurable depth
 - **Duplicate protection** — PostgreSQL-backed deduplication prevents re-sending already mirrored messages
-- **Watchdog** — automatically restarts the worker if it crashes or becomes unresponsive
+- **Watchdog** — automatically restarts the worker if it crashes silently
+- **Service message handling** — service events (pins, channel creation, etc.) are logged and skipped cleanly without errors
 - **Web dashboard** — real-time activity log via Streamlit UI (auto-refreshes every 10 seconds)
 - **Docker-ready** — fully containerized, designed to run on any Linux server
 
@@ -23,7 +24,7 @@ A self-hosted Telegram channel mirroring bot that silently copies posts from a s
 
 ```
 telegram-watcher/
-├── main.py              # Bot core: polling loop, worker queue, watchdog
+├── main.py              # Bot core: event handler, worker queue, watchdog, startup catchup
 ├── storage.py           # PostgreSQL async storage (asyncpg)
 ├── dashboard.py         # Streamlit monitoring dashboard
 ├── scan.py              # Utility: scan and print real channel IDs
@@ -48,7 +49,7 @@ API_ID      = 123456
 API_HASH    = "your_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # Source channel ID
 TARGET_CHANNEL  = -1009876543210  # Mirror channel ID
-HISTORY_DEPTH   = 100             # How many past messages to backfill
+HISTORY_DEPTH   = 100             # How many recent messages to check for catchup on startup
 
 # If PostgreSQL runs on the host: use "localhost"
 # If PostgreSQL runs in a Docker container on the same network: use the container name
@@ -189,7 +190,6 @@ The Streamlit dashboard shows a live activity log with color-coded event types:
 
 | Color  | Event Type | Meaning                     |
 |--------|------------|-----------------------------|
-| 🔵 Blue  | RECEIVED   | Message picked up from source |
 | 🟢 Green | SENT       | Message mirrored successfully |
 | 🔴 Red   | ERROR      | Something went wrong         |
 | 🟠 Orange | WARNING   | FloodWait or soft issue      |
@@ -208,7 +208,7 @@ python scan.py
 ```
 
 ### `reset_db.py`
-Removes specific message IDs from the `posted_messages` table, forcing the bot to re-mirror them on the next poll cycle. Edit the `TARGET_IDS` list inside the script before running.
+Removes specific message IDs from the `posted_messages` table, forcing the bot to re-mirror them on the next startup catchup. Edit the `TARGET_IDS` list inside the script before running.
 
 ```bash
 python reset_db.py
@@ -253,12 +253,13 @@ MIT License. Use at your own risk. Mirroring channels may violate Telegram's Ter
 
 - **Тихое зеркалирование** — сообщения копируются, а не пересылаются, поэтому в канале-зеркале не отображается источник
 - **Умная пересылка** — если пост в канале-источнике сам является пересылкой от другого пользователя или канала, авторство сохраняется
-- **Поддержка альбомов** — корректно обрабатывает медиагруппы (например, 5 фото + подпись) как единое сообщение
+- **События в реальном времени** — использует MTProto-механизм Pyrogram: сообщения приходят мгновенно, без polling-задержки
+- **Catchup при запуске** — при каждом старте бот проверяет последние `HISTORY_DEPTH` сообщений и ставит в очередь всё, что пропустил во время простоя
+- **Умная синхронизация альбомов** — динамически опрашивает `get_media_group` пока количество частей не стабилизируется (два одинаковых результата подряд), только потом пересылает — никаких фиксированных задержек и неполных альбомов
 - **Все типы медиа** — текст, фото, видео, голосовые, кружочки, документы, музыка, стикеры
-- **Активный поллинг** — бот сам опрашивает канал каждые N секунд, работает даже если Telegram не присылает push-уведомления
-- **Заполнение истории** — при первом запуске зеркалирует уже существующие сообщения на заданную глубину
 - **Защита от дублей** — PostgreSQL хранит ID обработанных сообщений, повторная отправка исключена
-- **Watchdog** — автоматически перезапускает воркер при сбое или зависании
+- **Watchdog** — автоматически перезапускает воркер при тихом сбое
+- **Обработка сервисных сообщений** — события типа «закреп», «создание канала» и т.д. логируются и пропускаются без ошибок
 - **Веб-дашборд** — лог активности в реальном времени через Streamlit (обновляется каждые 10 секунд)
 - **Docker-ready** — полностью контейнеризирован, рассчитан на запуск на любом Linux-сервере
 
@@ -268,7 +269,7 @@ MIT License. Use at your own risk. Mirroring channels may violate Telegram's Ter
 
 ```
 telegram-watcher/
-├── main.py              # Ядро бота: цикл поллинга, очередь воркера, watchdog
+├── main.py              # Ядро бота: event handler, очередь воркера, watchdog, catchup при старте
 ├── storage.py           # Асинхронное хранилище PostgreSQL (asyncpg)
 ├── dashboard.py         # Дашборд мониторинга на Streamlit
 ├── scan.py              # Утилита: поиск реального числового ID канала
@@ -293,7 +294,7 @@ API_ID      = 123456
 API_HASH    = "твой_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # ID канала-источника
 TARGET_CHANNEL  = -1009876543210  # ID канала-зеркала
-HISTORY_DEPTH   = 100             # Глубина заполнения истории (кол-во сообщений)
+HISTORY_DEPTH   = 100             # Сколько последних сообщений проверять при catchup на старте
 
 # Если PostgreSQL запущен на хосте — используй "localhost"
 # Если PostgreSQL запущен в Docker-контейнере в той же сети — используй имя контейнера
@@ -432,12 +433,11 @@ docker run -d --name telegram-watcher --restart unless-stopped --network tg-net 
 
 Streamlit-дашборд показывает лог активности с цветовой индикацией событий:
 
-| Цвет     | Тип события | Значение                          |
-|----------|-------------|-----------------------------------|
-| 🔵 Синий  | RECEIVED    | Сообщение получено из источника   |
-| 🟢 Зелёный | SENT       | Сообщение успешно зеркалировано   |
-| 🔴 Красный | ERROR      | Произошла ошибка                  |
-| 🟠 Оранжевый | WARNING  | FloodWait или мягкая проблема     |
+| Цвет       | Тип события | Значение                        |
+|------------|-------------|---------------------------------|
+| 🟢 Зелёный  | SENT        | Сообщение успешно зеркалировано |
+| 🔴 Красный  | ERROR       | Произошла ошибка                |
+| 🟠 Оранжевый | WARNING    | FloodWait или мягкая проблема   |
 
 Все временные метки отображаются по **московскому времени (UTC+3)**.
 
@@ -453,7 +453,7 @@ python scan.py
 ```
 
 ### `reset_db.py`
-Удаляет конкретные ID сообщений из таблицы `posted_messages`, заставляя бота повторно зеркалировать их на следующем цикле опроса. Перед запуском отредактируй список `TARGET_IDS` внутри скрипта.
+Удаляет конкретные ID сообщений из таблицы `posted_messages`, заставляя бота повторно зеркалировать их при следующем catchup на старте. Перед запуском отредактируй список `TARGET_IDS` внутри скрипта.
 
 ```bash
 python reset_db.py
