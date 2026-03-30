@@ -1,18 +1,15 @@
 import asyncio
 import logging
 import sys
-import time
-from pyrogram import Client
-from pyrogram.errors import FloodWait
+from pyrogram import Client, filters, idle
+from pyrogram.handlers import MessageHandler
 
-# Импорт конфига
 from config import (
     API_ID, API_HASH, SOURCE_CHANNEL, TARGET_CHANNEL, HISTORY_DEPTH, PROXY
 )
-import config 
+import config
 from storage import Storage
 
-# Логгер
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -21,22 +18,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-# Инициализация
 app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH, proxy=PROXY)
 if PROXY:
     logger.info(f"🌐 Proxy: {PROXY['scheme']}://{PROXY['hostname']}:{PROXY['port']}")
 db = Storage(config)
 ALBUM_CACHE = set()
 msg_queue = None
-last_activity = time.time()
 
-# Настройки опроса (в секундах)
-POLL_INTERVAL = 10
-WATCHDOG_TIMEOUT = 300  # 5 минут без активности → перезапуск
-API_TIMEOUT = 30        # таймаут на каждый Pyrogram API call
+API_TIMEOUT = 30
+ALBUM_MAX_WAIT = 10.0   # максимум секунд ждать альбом
+ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
+worker_task = None
+_target_id = None
 
-worker_task = None  # отслеживаем задачу воркера
-_target_id = None   # нужен воtчдогу для перезапуска воркера
 
 # --- 0. WATCHDOG ---
 async def watchdog_loop():
@@ -44,8 +38,6 @@ async def watchdog_loop():
     logger.info("🐕 Watchdog started")
     while True:
         await asyncio.sleep(60)
-
-        # Проверяем, не упал ли воркер тихо
         if worker_task is not None and worker_task.done():
             exc = None
             if not worker_task.cancelled():
@@ -53,17 +45,58 @@ async def watchdog_loop():
                     exc = worker_task.exception()
                 except Exception:
                     pass
-            logger.critical(f"💀 Watchdog: worker task died (exc={exc}), restarting worker")
+            logger.critical(f"💀 Watchdog: worker died (exc={exc}), restarting")
             worker_task = asyncio.create_task(worker_loop(app, _target_id))
 
-        idle = time.time() - last_activity
-        if idle > WATCHDOG_TIMEOUT:
-            logger.critical(f"💀 Watchdog: no activity for {idle:.0f}s, forcing restart")
-            sys.exit(1)
 
-# --- 1. ВОРКЕР (Обработчик очереди) ---
+# --- 1. ALBUM COLLECTOR ---
+async def collect_album(client, chat_id, msg_id):
+    """
+    Опрашивает get_media_group с интервалом ALBUM_POLL_INTERVAL.
+    Возвращает группу как только два последовательных вызова
+    вернули одинаковое количество частей (альбом стабилен).
+    Жёсткий таймаут — ALBUM_MAX_WAIT секунд.
+    """
+    prev_count = 0
+    elapsed = 0.0
+
+    while elapsed < ALBUM_MAX_WAIT:
+        await asyncio.sleep(ALBUM_POLL_INTERVAL)
+        elapsed += ALBUM_POLL_INTERVAL
+
+        try:
+            group = await asyncio.wait_for(
+                client.get_media_group(chat_id, msg_id), timeout=5
+            )
+        except (ValueError, asyncio.TimeoutError):
+            break
+
+        if len(group) == prev_count and prev_count > 0:
+            logger.info(f"📚 Album {msg_id} complete: {len(group)} parts in {elapsed:.1f}s")
+            return group
+
+        prev_count = len(group)
+
+    # Таймаут — берём что есть
+    logger.warning(f"⚠️ Album {msg_id} timed out after {elapsed:.1f}s, forwarding {prev_count} parts")
+    try:
+        return await asyncio.wait_for(client.get_media_group(chat_id, msg_id), timeout=5)
+    except (ValueError, asyncio.TimeoutError):
+        return None
+
+
+# --- 2. HANDLERS ---
+async def on_new_message(client, message):
+    logger.info(f"📥 New message: {message.id}")
+    await msg_queue.put(message)
+
+
+async def on_service_message(client, message):
+    logger.info(f"ℹ️ Service event in {message.chat.id} (id={message.id}, service={message.service}), skipping")
+
+
+# --- 3. ВОРКЕР ---
 async def worker_loop(client, target_id):
-    global last_activity
     logger.info("👷 Worker started")
     while True:
         message = await msg_queue.get()
@@ -82,14 +115,8 @@ async def worker_loop(client, target_id):
                 ALBUM_CACHE.add(message.media_group_id)
                 logger.info(f"📚 Album detected: {message.media_group_id}")
 
-                # Ждем, пока Telegram "обновит" данные о группе медиа
-                await asyncio.sleep(2)
-
-                try:
-                    media_group = await asyncio.wait_for(
-                        client.get_media_group(chat_id, msg_id), timeout=API_TIMEOUT
-                    )
-                except ValueError:
+                media_group = await collect_album(client, chat_id, msg_id)
+                if media_group is None:
                     media_group = [message]
 
                 is_fwd = any(m.forward_date for m in media_group)
@@ -108,7 +135,6 @@ async def worker_loop(client, target_id):
                     await db.mark_processed(chat_id, m.id)
                 if len(ALBUM_CACHE) > 100:
                     ALBUM_CACHE.clear()
-                last_activity = time.time()
                 await db.log_event("SENT", message, "Album mirrored")
 
             # Обычные сообщения
@@ -119,7 +145,6 @@ async def worker_loop(client, target_id):
                     await asyncio.wait_for(message.copy(target_id), timeout=API_TIMEOUT)
 
                 await db.mark_processed(chat_id, msg_id)
-                last_activity = time.time()
                 logger.info(f"✅ Sent Msg {msg_id}")
                 await db.log_event("SENT", message, "Message mirrored")
 
@@ -132,43 +157,22 @@ async def worker_loop(client, target_id):
         finally:
             msg_queue.task_done()
 
-# --- 2. ПОЛЛЕР (Активный опрос) ---
-async def polling_loop(client, source_id):
-    """
-    Вместо ожидания уведомлений, мы сами проверяем канал каждые N секунд.
-    Это работает, даже если PUSH-уведомления сломаны.
-    """
-    logger.info(f"🔄 Polling loop started for {source_id}")
-    while True:
-        try:
-            # Берем последние 10 сообщений (на случай, если пришло несколько сразу)
-            # reverse=True нужно, чтобы они шли от старых к новым
-            messages = []
-            async for m in client.get_chat_history(source_id, limit=10):
-                messages.append(m)
-            
-            # Разворачиваем, чтобы обрабатывать в хронологическом порядке
-            for message in reversed(messages):
-                # Если сообщение УЖЕ в базе - игнорируем (молча)
-                if await db.is_processed(message.chat.id, message.id):
-                    continue
-                
-                # Если НОВОЕ - кидаем в очередь
-                logger.info(f"📥 New message found via polling: {message.id}")
-                await msg_queue.put(message)
 
-            global last_activity
-            last_activity = time.time()
+# --- 3. CATCHUP (догонялка при старте) ---
+async def catchup(client, source_id):
+    logger.info(f"🔍 Catchup: checking last {HISTORY_DEPTH} messages...")
+    messages = []
+    async for m in client.get_chat_history(source_id, limit=HISTORY_DEPTH):
+        messages.append(m)
 
-        except FloodWait as e:
-            logger.warning(f"⏳ FloodWait {e.value}s")
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            logger.error(f"⚠️ Polling error: {e}")
-            # Не падаем, просто ждем следующего цикла
+    queued = 0
+    for message in reversed(messages):  # хронологический порядок
+        if not await db.is_processed(message.chat.id, message.id):
+            await msg_queue.put(message)
+            queued += 1
 
-        # Спим перед следующим запросом
-        await asyncio.sleep(POLL_INTERVAL)
+    logger.info(f"✅ Catchup: queued {queued} unprocessed messages")
+
 
 async def resolve_chat(client, identifier):
     try:
@@ -180,12 +184,13 @@ async def resolve_chat(client, identifier):
             if dialog.chat.username and str(dialog.chat.username).lower() == str(identifier).lower().replace("@", ""): return dialog.chat.id
     raise ValueError(f"Chat {identifier} not found")
 
+
 # --- MAIN ---
 async def main():
-    global msg_queue
+    global msg_queue, worker_task, _target_id
     msg_queue = asyncio.Queue()
     await db.connect()
-    logger.info("🚀 Bot Starting (Polling Mode)...")
+    logger.info("🚀 Bot Starting (Event Mode)...")
     await app.start()
 
     try:
@@ -197,19 +202,22 @@ async def main():
         await app.stop()
         return
 
-    global worker_task, _target_id
     _target_id = target_id
 
-    # Запускаем три параллельных процесса:
-    # 1. Worker (отправляет сообщения)
-    worker_task = asyncio.create_task(worker_loop(app, target_id))
-    # 2. Watchdog (перезапускает при зависании или смерти воркера)
-    asyncio.create_task(watchdog_loop())
-    # 3. Poller (ищет новые сообщения)
-    await polling_loop(app, source_id)
+    # Обычные сообщения — в очередь
+    app.add_handler(MessageHandler(on_new_message, filters.chat(source_id) & ~filters.service))
+    # Сервисные события — только в лог
+    app.add_handler(MessageHandler(on_service_message, filters.chat(source_id) & filters.service))
 
-    # Сюда код дойдет только если polling_loop упадет (чего быть не должно)
+    worker_task = asyncio.create_task(worker_loop(app, target_id))
+    asyncio.create_task(watchdog_loop())
+
+    # Докидываем пропущенные сообщения за время даунтайма
+    await catchup(app, source_id)
+
+    await idle()
     await app.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
