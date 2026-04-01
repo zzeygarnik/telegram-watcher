@@ -49,7 +49,7 @@ API_ID      = 123456
 API_HASH    = "your_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # Source channel ID
 TARGET_CHANNEL  = -1009876543210  # Mirror channel ID
-HISTORY_DEPTH   = 100             # How many recent messages to check for catchup on startup
+HISTORY_DEPTH   = 200             # How many recent messages to check for catchup on startup
 
 # If PostgreSQL runs on the host: use "localhost"
 # If PostgreSQL runs in a Docker container on the same network: use the container name
@@ -73,6 +73,8 @@ PROXY = {"scheme": "socks5", "hostname": "your.proxy.host", "port": 1234, "usern
 ```
 
 Both SOCKS5 and HTTP proxies are supported. Set `PROXY = None` to connect directly.
+
+> **Note:** Some VPS and cloud providers perform Deep Packet Inspection (DPI) that blocks MTProto traffic even when Telegram's IP addresses are reachable via TCP. If Pyrogram keeps logging `Connection timed out` in a loop, a proxy is required regardless of your server's geographic location.
 
 ---
 
@@ -294,7 +296,7 @@ API_ID      = 123456
 API_HASH    = "твой_api_hash"
 SOURCE_CHANNEL  = -1001234567890  # ID канала-источника
 TARGET_CHANNEL  = -1009876543210  # ID канала-зеркала
-HISTORY_DEPTH   = 100             # Сколько последних сообщений проверять при catchup на старте
+HISTORY_DEPTH   = 200             # Сколько последних сообщений проверять при catchup на старте
 
 # Если PostgreSQL запущен на хосте — используй "localhost"
 # Если PostgreSQL запущен в Docker-контейнере в той же сети — используй имя контейнера
@@ -318,6 +320,8 @@ PROXY = {"scheme": "socks5", "hostname": "твой.прокси.хост", "port
 ```
 
 Поддерживаются SOCKS5 и HTTP прокси. Чтобы подключаться напрямую — оставь `PROXY = None`.
+
+> **Важно:** Некоторые VPS и облачные провайдеры применяют DPI (глубокую инспекцию трафика), которая блокирует MTProto даже если IP-адреса Telegram доступны по TCP. Если Pyrogram бесконечно пишет `Connection timed out` в логах — прокси нужен вне зависимости от географии сервера.
 
 ---
 

@@ -26,12 +26,12 @@ Thumbs.db
 # Logs
 *.log
 
-# Claude Code
+# AI / editor
 .claude/
 .claudecode.json
-CONTEXT.md
 
 # Debug / one-off scripts
 debug.py
 debug_mirror.py
 check_target.py
+check_session.py
