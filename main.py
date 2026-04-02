@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from pyrogram import Client, filters, idle
-from pyrogram.handlers import MessageHandler
+from pyrogram.handlers import MessageHandler, RawUpdateHandler
 
 from config import (
     API_ID, API_HASH, SOURCE_CHANNEL, TARGET_CHANNEL, HISTORY_DEPTH, PROXY
@@ -132,6 +132,13 @@ async def collect_album(client, chat_id, msg_id):
 
 
 # --- 2. HANDLERS ---
+async def on_raw_update(client, update, users, chats):
+    update_type = type(update).__name__
+    # Логируем только обновления, связанные с каналом-источником
+    chat_id = getattr(update, "channel_id", None) or getattr(getattr(update, "message", None), "peer_id", None)
+    logger.info(f"🔬 RAW UPDATE: {update_type} | chat={chat_id}")
+
+
 async def on_new_message(client, message):
     logger.info(f"📥 New message: {message.id}")
     await msg_queue.put(message)
@@ -258,6 +265,8 @@ async def main():
     except Exception as e:
         logger.info(f"ℹ️ join_chat: {e} (likely already a member)")
 
+    # Временный raw-хэндлер для диагностики: логирует все входящие update-типы
+    app.add_handler(RawUpdateHandler(on_raw_update))
     # Обычные сообщения — в очередь
     app.add_handler(MessageHandler(on_new_message, filters.chat(source_id) & ~filters.service))
     # Сервисные события — только в лог
