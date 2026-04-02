@@ -28,8 +28,39 @@ msg_queue = None
 API_TIMEOUT = 30
 ALBUM_MAX_WAIT = 10.0   # максимум секунд ждать альбом
 ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
+KEEPALIVE_INTERVAL = 300   # пинг каждые 5 минут
 worker_task = None
 _target_id = None
+_source_id = None
+
+
+# --- 0. KEEPALIVE ---
+async def keepalive_loop():
+    """Пингует Telegram каждые KEEPALIVE_INTERVAL секунд.
+    При silent disconnect — переподключается и делает catchup."""
+    global _source_id
+    logger.info("💓 Keepalive started")
+    while True:
+        await asyncio.sleep(KEEPALIVE_INTERVAL)
+        try:
+            await asyncio.wait_for(app.get_me(), timeout=20)
+        except Exception as e:
+            logger.error(f"💓 Keepalive ping failed ({e}), reconnecting...")
+            for attempt in range(5):
+                try:
+                    try:
+                        await app.stop()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(5 * (attempt + 1))
+                    await app.start()
+                    logger.info("💓 Reconnected to Telegram")
+                    await catchup(app, _source_id)
+                    break
+                except Exception as re:
+                    logger.error(f"💓 Reconnect attempt {attempt + 1}/5 failed: {re}")
+            else:
+                logger.critical("💓 All reconnect attempts failed — manual intervention needed")
 
 
 # --- 0. WATCHDOG ---
@@ -187,7 +218,7 @@ async def resolve_chat(client, identifier):
 
 # --- MAIN ---
 async def main():
-    global msg_queue, worker_task, _target_id
+    global msg_queue, worker_task, _target_id, _source_id
     msg_queue = asyncio.Queue()
     await db.connect()
     logger.info("🚀 Bot Starting (Event Mode)...")
@@ -203,6 +234,7 @@ async def main():
         return
 
     _target_id = target_id
+    _source_id = source_id
 
     # Обычные сообщения — в очередь
     app.add_handler(MessageHandler(on_new_message, filters.chat(source_id) & ~filters.service))
@@ -211,6 +243,7 @@ async def main():
 
     worker_task = asyncio.create_task(worker_loop(app, target_id))
     asyncio.create_task(watchdog_loop())
+    asyncio.create_task(keepalive_loop())
 
     # Докидываем пропущенные сообщения за время даунтайма
     await catchup(app, source_id)
