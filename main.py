@@ -26,13 +26,15 @@ ALBUM_CACHE = set()
 msg_queue = None
 
 API_TIMEOUT = 30
-ALBUM_MAX_WAIT = 10.0   # максимум секунд ждать альбом
+ALBUM_MAX_WAIT = 10.0      # максимум секунд ждать альбом
 ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
 KEEPALIVE_INTERVAL = 300   # пинг каждые 5 минут
-CATCHUP_INTERVAL = 60      # периодический catchup каждую минуту
+CATCHUP_INTERVAL = 300     # полный catchup как страховка раз в 5 минут
+FAST_POLL_INTERVAL = 5     # быстрый опрос на новые сообщения каждые 5 секунд
 worker_task = None
 _target_id = None
 _source_id = None
+_last_polled_id = 0        # последний ID, зафиксированный fast_poll
 
 
 # --- 0. KEEPALIVE ---
@@ -62,6 +64,59 @@ async def keepalive_loop():
                     logger.error(f"💓 Reconnect attempt {attempt + 1}/5 failed: {re}")
             else:
                 logger.critical("💓 All reconnect attempts failed — manual intervention needed")
+
+
+# --- 0. FAST POLL ---
+async def fast_poll_loop():
+    """Опрашивает канал каждые FAST_POLL_INTERVAL секунд.
+    Берёт 1 сообщение (дешёво), сравнивает ID с последним известным.
+    Если есть новые — забирает только дельту и ставит в очередь."""
+    global _source_id, _last_polled_id
+    logger.info("⚡ Fast poll started")
+    while True:
+        await asyncio.sleep(FAST_POLL_INTERVAL)
+        try:
+            # Один дешёвый запрос — узнаём последний ID
+            latest = None
+            async for m in app.get_chat_history(_source_id, limit=1):
+                latest = m
+                break
+
+            if latest is None:
+                continue
+
+            latest_id = latest.id
+
+            if _last_polled_id == 0:
+                _last_polled_id = latest_id
+                continue
+
+            if latest_id <= _last_polled_id:
+                continue
+
+            # Есть новые сообщения — забираем дельту
+            gap = latest_id - _last_polled_id
+            fetch_limit = min(gap + 5, 50)
+
+            new_messages = []
+            async for m in app.get_chat_history(_source_id, limit=fetch_limit):
+                if m.id <= _last_polled_id:
+                    break
+                new_messages.append(m)
+
+            queued = 0
+            for m in reversed(new_messages):
+                if not await db.is_processed(m.chat.id, m.id):
+                    await msg_queue.put(m)
+                    queued += 1
+
+            if queued:
+                logger.info(f"⚡ Fast poll: queued {queued} new messages up to id={latest_id}")
+
+            _last_polled_id = latest_id
+
+        except Exception as e:
+            logger.error(f"⚡ Fast poll error: {e}")
 
 
 # --- 0. PERIODIC CATCHUP ---
@@ -277,6 +332,12 @@ async def main():
 
     # Докидываем пропущенные сообщения за время даунтайма
     await catchup(app, source_id)
+
+    # Инициализируем точку отсчёта для fast_poll из БД (после catchup)
+    global _last_polled_id
+    _last_polled_id = await db.get_max_processed_id(source_id)
+    logger.info(f"⚡ Fast poll starting from id={_last_polled_id}")
+    asyncio.create_task(fast_poll_loop())
 
     await idle()
     await app.stop()
