@@ -258,12 +258,19 @@ async def main():
     _target_id = target_id
     _source_id = source_id
 
-    # Подписываемся на канал-источник чтобы Telegram слал live-апдейты
+    # Подписываемся на канал-источник и синхронизируем pts сессии
     try:
         await app.join_chat(source_id)
         logger.info(f"✅ Joined source channel {source_id}")
     except Exception as e:
         logger.info(f"ℹ️ join_chat: {e} (likely already a member)")
+
+    # Синхронизируем диалоги — инициализирует pts для всех каналов в сессии,
+    # после чего Telegram начинает слать live-апдейты
+    logger.info("🔄 Syncing dialogs to initialize channel pts...")
+    async for _ in app.get_dialogs():
+        pass
+    logger.info("✅ Dialogs synced")
 
     # Временный raw-хэндлер для диагностики: логирует все входящие update-типы
     app.add_handler(RawUpdateHandler(on_raw_update))
