@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 from pyrogram import Client, filters, idle
-from pyrogram.handlers import MessageHandler, RawUpdateHandler
+from pyrogram.handlers import MessageHandler
 
 from config import (
     API_ID, API_HASH, SOURCE_CHANNEL, TARGET_CHANNEL, HISTORY_DEPTH, PROXY
@@ -29,7 +29,7 @@ API_TIMEOUT = 30
 ALBUM_MAX_WAIT = 10.0   # максимум секунд ждать альбом
 ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
 KEEPALIVE_INTERVAL = 300   # пинг каждые 5 минут
-CATCHUP_INTERVAL = 300     # периодический catchup каждые 5 минут
+CATCHUP_INTERVAL = 60      # периодический catchup каждую минуту
 worker_task = None
 _target_id = None
 _source_id = None
@@ -132,13 +132,6 @@ async def collect_album(client, chat_id, msg_id):
 
 
 # --- 2. HANDLERS ---
-async def on_raw_update(client, update, users, chats):
-    update_type = type(update).__name__
-    # Логируем только обновления, связанные с каналом-источником
-    chat_id = getattr(update, "channel_id", None) or getattr(getattr(update, "message", None), "peer_id", None)
-    logger.info(f"🔬 RAW UPDATE: {update_type} | chat={chat_id}")
-
-
 async def on_new_message(client, message):
     logger.info(f"📥 New message: {message.id}")
     await msg_queue.put(message)
@@ -272,8 +265,6 @@ async def main():
         pass
     logger.info("✅ Dialogs synced")
 
-    # Временный raw-хэндлер для диагностики: логирует все входящие update-типы
-    app.add_handler(RawUpdateHandler(on_raw_update))
     # Обычные сообщения — в очередь
     app.add_handler(MessageHandler(on_new_message, filters.chat(source_id) & ~filters.service))
     # Сервисные события — только в лог
