@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 from pyrogram import Client, filters, idle
+from pyrogram.errors import FloodWait
 from pyrogram.handlers import MessageHandler
 
 from config import (
@@ -30,7 +31,7 @@ ALBUM_MAX_WAIT = 10.0      # максимум секунд ждать альбо
 ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
 KEEPALIVE_INTERVAL = 300   # пинг каждые 5 минут
 CATCHUP_INTERVAL = 300     # полный catchup как страховка раз в 5 минут
-FAST_POLL_INTERVAL = 5     # быстрый опрос на новые сообщения каждые 5 секунд
+FAST_POLL_INTERVAL = 10    # быстрый опрос на новые сообщения каждые 10 секунд
 worker_task = None
 _target_id = None
 _source_id = None
@@ -115,6 +116,9 @@ async def fast_poll_loop():
 
             _last_polled_id = latest_id
 
+        except FloodWait as e:
+            logger.warning(f"⚡ Fast poll FloodWait: sleeping {e.value}s")
+            await asyncio.sleep(e.value)
         except Exception as e:
             logger.error(f"⚡ Fast poll error: {e}")
 
