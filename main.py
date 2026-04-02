@@ -16,7 +16,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("pyrogram").setLevel(logging.DEBUG)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH, proxy=PROXY)
 if PROXY:
@@ -250,6 +250,13 @@ async def main():
 
     _target_id = target_id
     _source_id = source_id
+
+    # Подписываемся на канал-источник чтобы Telegram слал live-апдейты
+    try:
+        await app.join_chat(source_id)
+        logger.info(f"✅ Joined source channel {source_id}")
+    except Exception as e:
+        logger.info(f"ℹ️ join_chat: {e} (likely already a member)")
 
     # Обычные сообщения — в очередь
     app.add_handler(MessageHandler(on_new_message, filters.chat(source_id) & ~filters.service))
