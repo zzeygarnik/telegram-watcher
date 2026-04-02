@@ -16,7 +16,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram").setLevel(logging.DEBUG)
 
 app = Client("my_mirror_bot", api_id=API_ID, api_hash=API_HASH, proxy=PROXY)
 if PROXY:
