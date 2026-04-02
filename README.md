@@ -8,8 +8,9 @@ A self-hosted Telegram channel mirroring bot that silently copies posts from a s
 
 - **Silent mirroring** — messages are copied (not forwarded), so no source attribution appears in the mirror channel
 - **Smart forwarding** — if a post in the source channel is itself a forward from another user or channel, that attribution *is* preserved
-- **Real-time events** — uses Pyrogram's MTProto event system to receive messages instantly as they arrive, no polling delay
+- **Fast polling** — polls the source channel every 10 seconds using a lightweight single-message check; on new message detection, fetches only the delta and queues it immediately (~10s delivery delay)
 - **Startup catchup** — on every launch, checks the last `HISTORY_DEPTH` messages and queues any that were missed during downtime
+- **Periodic safety net** — full catchup runs every 5 minutes as a fallback in case of silent disconnects
 - **Smart album sync** — dynamically polls `get_media_group` until the part count stabilizes (two equal consecutive checks), then forwards — no fixed delay, no partial albums
 - **All media types** — text, photos, videos, voice messages, video notes (circles), documents, audio, stickers
 - **Duplicate protection** — PostgreSQL-backed deduplication prevents re-sending already mirrored messages
@@ -255,8 +256,9 @@ MIT License. Use at your own risk. Mirroring channels may violate Telegram's Ter
 
 - **Тихое зеркалирование** — сообщения копируются, а не пересылаются, поэтому в канале-зеркале не отображается источник
 - **Умная пересылка** — если пост в канале-источнике сам является пересылкой от другого пользователя или канала, авторство сохраняется
-- **События в реальном времени** — использует MTProto-механизм Pyrogram: сообщения приходят мгновенно, без polling-задержки
+- **Быстрый опрос** — каждые 10 секунд берёт одно последнее сообщение (дешёвый запрос), сравнивает ID с последним известным, при новых — забирает только дельту (~10 секунд задержки доставки)
 - **Catchup при запуске** — при каждом старте бот проверяет последние `HISTORY_DEPTH` сообщений и ставит в очередь всё, что пропустил во время простоя
+- **Страховочный catchup** — полная проверка запускается раз в 5 минут на случай тихого отключения
 - **Умная синхронизация альбомов** — динамически опрашивает `get_media_group` пока количество частей не стабилизируется (два одинаковых результата подряд), только потом пересылает — никаких фиксированных задержек и неполных альбомов
 - **Все типы медиа** — текст, фото, видео, голосовые, кружочки, документы, музыка, стикеры
 - **Защита от дублей** — PostgreSQL хранит ID обработанных сообщений, повторная отправка исключена
