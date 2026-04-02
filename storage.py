@@ -54,6 +54,14 @@ class Storage:
             )
             return res is not None
 
+    async def get_max_processed_id(self, chat_id: int) -> int:
+        async with self.pool.acquire() as conn:
+            res = await conn.fetchval(
+                "SELECT MAX(msg_id) FROM posted_messages WHERE chat_id = $1",
+                chat_id
+            )
+            return res or 0
+
     async def mark_processed(self, chat_id: int, msg_id: int):
         async with self.pool.acquire() as conn:
             await conn.execute(
