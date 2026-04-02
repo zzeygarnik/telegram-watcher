@@ -29,6 +29,7 @@ API_TIMEOUT = 30
 ALBUM_MAX_WAIT = 10.0   # максимум секунд ждать альбом
 ALBUM_POLL_INTERVAL = 0.5  # как часто проверять get_media_group
 KEEPALIVE_INTERVAL = 300   # пинг каждые 5 минут
+CATCHUP_INTERVAL = 300     # периодический catchup каждые 5 минут
 worker_task = None
 _target_id = None
 _source_id = None
@@ -61,6 +62,20 @@ async def keepalive_loop():
                     logger.error(f"💓 Reconnect attempt {attempt + 1}/5 failed: {re}")
             else:
                 logger.critical("💓 All reconnect attempts failed — manual intervention needed")
+
+
+# --- 0. PERIODIC CATCHUP ---
+async def periodic_catchup_loop():
+    """Страховка на случай silent MTProto disconnect: каждые CATCHUP_INTERVAL секунд
+    догоняет пропущенные сообщения через прямые API-запросы."""
+    global _source_id
+    await asyncio.sleep(CATCHUP_INTERVAL)  # первый запуск после старта — дать время на нормальную работу
+    while True:
+        try:
+            await catchup(app, _source_id)
+        except Exception as e:
+            logger.error(f"🔄 Periodic catchup error: {e}")
+        await asyncio.sleep(CATCHUP_INTERVAL)
 
 
 # --- 0. WATCHDOG ---
@@ -244,6 +259,7 @@ async def main():
     worker_task = asyncio.create_task(worker_loop(app, target_id))
     asyncio.create_task(watchdog_loop())
     asyncio.create_task(keepalive_loop())
+    asyncio.create_task(periodic_catchup_loop())
 
     # Докидываем пропущенные сообщения за время даунтайма
     await catchup(app, source_id)
