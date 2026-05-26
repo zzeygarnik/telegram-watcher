@@ -24,6 +24,7 @@ if PROXY:
     logger.info(f"🌐 Proxy: {PROXY['scheme']}://{PROXY['hostname']}:{PROXY['port']}")
 db = Storage(config)
 ALBUM_CACHE = set()
+_queued_ids: set = set()  # dedup: message IDs currently in queue
 msg_queue = None
 
 API_TIMEOUT = 30
@@ -36,6 +37,17 @@ worker_task = None
 _target_id = None
 _source_id = None
 _last_polled_id = 0        # последний ID, зафиксированный fast_poll
+
+
+async def _enqueue(message) -> bool:
+    """Put message in queue only once — dedup by message ID. Returns True if queued."""
+    if message.id in _queued_ids:
+        return False
+    if await db.is_processed(message.chat.id, message.id):
+        return False
+    _queued_ids.add(message.id)
+    await msg_queue.put(message)
+    return True
 
 
 # --- 0. KEEPALIVE ---
@@ -107,8 +119,7 @@ async def fast_poll_loop():
 
             queued = 0
             for m in reversed(new_messages):
-                if not await db.is_processed(m.chat.id, m.id):
-                    await msg_queue.put(m)
+                if await _enqueue(m):
                     queued += 1
 
             if queued:
@@ -193,7 +204,7 @@ async def collect_album(client, chat_id, msg_id):
 # --- 2. HANDLERS ---
 async def on_new_message(client, message):
     logger.info(f"📥 New message: {message.id}")
-    await msg_queue.put(message)
+    await _enqueue(message)
 
 
 async def on_service_message(client, message):
@@ -260,6 +271,7 @@ async def worker_loop(client, target_id):
             logger.error(f"❌ Worker Error: {e}")
             await db.log_event("ERROR", "System", str(e))
         finally:
+            _queued_ids.discard(msg_id)
             msg_queue.task_done()
 
 
@@ -272,8 +284,7 @@ async def catchup(client, source_id):
 
     queued = 0
     for message in reversed(messages):  # хронологический порядок
-        if not await db.is_processed(message.chat.id, message.id):
-            await msg_queue.put(message)
+        if await _enqueue(message):
             queued += 1
 
     logger.info(f"✅ Catchup: queued {queued} unprocessed messages")
